@@ -1,0 +1,6 @@
+streamlit
+openbb
+plotly
+yfinance
+pandas
+matplotlib
