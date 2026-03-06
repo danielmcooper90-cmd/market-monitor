@@ -8,10 +8,17 @@
 #   streamlit run monitor_v2.py
 # ============================================================
 
+import os
+import tempfile
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+
+# ── OpenBB needs a writable home directory.
+# On Streamlit Cloud the default path is read-only, so we
+# redirect it to the system temp folder which is always writable.
+os.environ["OPENBB_HOME"] = tempfile.gettempdir()
 
 st.set_page_config(page_title="Market Monitor", layout="wide", page_icon="📊")
 
