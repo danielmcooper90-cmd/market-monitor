@@ -16,9 +16,14 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 # ── OpenBB needs a writable home directory.
-# On Streamlit Cloud the default path is read-only, so we
-# redirect it to the system temp folder which is always writable.
-os.environ["OPENBB_HOME"] = tempfile.gettempdir()
+# Must be set BEFORE importing openbb, otherwise it
+# tries to write to its own package directory which is
+# read-only on Streamlit Cloud.
+os.environ["OPENBB_HOME"]         = tempfile.gettempdir()
+os.environ["OPENBB_PYTHON_BUILD"] = "false"
+
+from openbb import obb
+obb.user.preferences.output_type = "dataframe"
 
 st.set_page_config(page_title="Market Monitor", layout="wide", page_icon="📊")
 
@@ -428,8 +433,6 @@ def load_prices(tickers, start_date, provider="yfinance"):
     Fetches prices via OpenBB. Skips tickers that fail and
     returns whatever it could load. Missing tickers are reported.
     """
-    from openbb import obb
-    obb.user.preferences.output_type = "dataframe"
     closes = []
     failed = []
     for t in tickers:
@@ -495,8 +498,6 @@ def load_names(tickers):
     yfinance returns a 'name' column in equity.profile().
     Cached 24hrs. Falls back to ticker string if lookup fails.
     """
-    from openbb import obb
-    obb.user.preferences.output_type = "dataframe"
     names = {}
     for t in tickers:
         try:
