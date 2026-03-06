@@ -10,15 +10,24 @@
 
 import os
 import tempfile
+import pathlib
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
-# ── OpenBB needs a writable home directory.
-# Must be set BEFORE importing openbb, otherwise it
-# tries to write to its own package directory which is
-# read-only on Streamlit Cloud.
+# ── OpenBB tries to write a lock file into its own package
+# directory on first import. On Streamlit Cloud that directory
+# is read-only, causing a PermissionError.
+# We patch the lock path to the temp directory BEFORE importing.
+try:
+    import openbb_core.app.static.package_builder as _pb
+    _pb.PackageBuilder._lock_path = property(
+        lambda self: pathlib.Path(tempfile.gettempdir()) / "openbb.lock"
+    )
+except Exception:
+    pass
+
 os.environ["OPENBB_HOME"]         = tempfile.gettempdir()
 os.environ["OPENBB_PYTHON_BUILD"] = "false"
 
