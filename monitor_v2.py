@@ -10,29 +10,11 @@
 
 import os
 import tempfile
-import pathlib
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-
-# ── OpenBB tries to write a lock file into its own package
-# directory on first import. On Streamlit Cloud that directory
-# is read-only, causing a PermissionError.
-# We patch the lock path to the temp directory BEFORE importing.
-try:
-    import openbb_core.app.static.package_builder as _pb
-    _pb.PackageBuilder._lock_path = property(
-        lambda self: pathlib.Path(tempfile.gettempdir()) / "openbb.lock"
-    )
-except Exception:
-    pass
-
-os.environ["OPENBB_HOME"]         = tempfile.gettempdir()
-os.environ["OPENBB_PYTHON_BUILD"] = "false"
-
-from openbb import obb
-obb.user.preferences.output_type = "dataframe"
+import yfinance as yf
 
 st.set_page_config(page_title="Market Monitor", layout="wide", page_icon="📊")
 
@@ -439,16 +421,21 @@ Not available via yfinance — source via broker
 @st.cache_data(ttl=300)
 def load_prices(tickers, start_date, provider="yfinance"):
     """
-    Fetches prices via OpenBB. Skips tickers that fail and
-    returns whatever it could load. Missing tickers are reported.
+    Fetches closing prices via yfinance directly.
+    Faster and works on Streamlit Cloud without any file system issues.
     """
-    closes = []
     failed = []
+    closes = []
     for t in tickers:
         try:
-            s = obb.equity.price.historical(
-                t, start_date=str(start_date), provider=provider
-            ).close.rename(t)
+            s = yf.download(
+                t, start=str(start_date),
+                progress=False, auto_adjust=True
+            )["Close"].squeeze()
+            s.index = pd.to_datetime(s.index)
+            if s.index.tz is not None:
+                s.index = s.index.tz_localize(None)
+            s = s.rename(t)
             closes.append(s)
         except Exception:
             failed.append(t)
@@ -503,16 +490,15 @@ with st.spinner("Loading FX rates…"):
 @st.cache_data(ttl=86400)
 def load_names(tickers):
     """
-    Fetches long name for each ticker via OpenBB / yfinance.
-    yfinance returns a 'name' column in equity.profile().
-    Cached 24hrs. Falls back to ticker string if lookup fails.
+    Fetches long name for each ticker via yfinance directly.
+    Equivalent of Bloomberg LONG_NAME. Cached 24hrs.
     """
     names = {}
     for t in tickers:
         try:
-            profile = obb.equity.profile(t, provider="yfinance")
-            val = profile["name"].iloc[0]
-            names[t] = str(val).strip() if val and str(val).strip() else t
+            info = yf.Ticker(t).info
+            name = info.get("longName") or info.get("shortName") or t
+            names[t] = name
         except Exception:
             names[t] = t
     return names
@@ -614,7 +600,7 @@ st.title("📊 Market Monitor")
 if not prices.empty:
     st.caption(f"Data as of {prices.index.max().date()}  ·  {len(prices.columns)} tickers loaded")
 else:
-    st.error("No price data loaded. Check your OpenBB connection.")
+    st.error("No price data loaded. Check your internet connection or try again.")
     st.stop()
 
 # Flag missing / failed tickers prominently

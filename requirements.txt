@@ -1,6 +1,5 @@
 streamlit
-openbb
-plotly
 yfinance
+plotly
 pandas
 matplotlib
