@@ -386,7 +386,108 @@ PLOTLY_LAYOUT = dict(
     margin=dict(l=10, r=10, t=40, b=10),
 )
 
+@st.cache_data(ttl=300)
+def load_ohlcv(ticker, start):
+    """Fetch full OHLCV data for a single ticker."""
+    try:
+        df = yf.download(ticker, start=str(start), progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        return df.sort_index()
+    except Exception:
+        return pd.DataFrame()
+
+def ohlcv_chart(ticker, height=400, ma_fast=20, ma_slow=50, show_volume=True):
+    """
+    Candlestick chart with dual MAs and optional volume on secondary axis.
+    Uses go.Candlestick + go.Bar with yaxis2.
+    """
+    df = load_ohlcv(ticker, start_date)
+    if df.empty or not all(c in df.columns for c in ["Open", "High", "Low", "Close"]):
+        return None
+
+    name = ticker_names.get(ticker, ticker)
+    ytd_ret = pct_from(df["Close"], pd.Timestamp(start_date))
+    ret_col = "#3fb950" if ytd_ret >= 0 else "#f85149"
+    arr     = "▲" if ytd_ret >= 0 else "▼"
+
+    row_heights = [0.75, 0.25] if show_volume and "Volume" in df.columns else [1.0]
+    rows        = 2 if (show_volume and "Volume" in df.columns) else 1
+
+    fig = make_subplots(
+        rows=rows, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=row_heights,
+    )
+
+    # ── Candlesticks
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df["Open"], high=df["High"],
+        low=df["Low"],   close=df["Close"],
+        name="OHLC",
+        increasing=dict(line=dict(color="#3fb950", width=1), fillcolor="#1a3a22"),
+        decreasing=dict(line=dict(color="#f85149", width=1), fillcolor="#3a1a1a"),
+        hovertext=[
+            f"O: {o:.2f}  H: {h:.2f}  L: {l:.2f}  C: {c:.2f}"
+            for o, h, l, c in zip(df["Open"], df["High"], df["Low"], df["Close"])
+        ],
+        hoverinfo="x+text",
+    ), row=1, col=1)
+
+    # ── Fast MA
+    if len(df) >= ma_fast:
+        mf = df["Close"].rolling(ma_fast).mean()
+        fig.add_trace(go.Scatter(
+            x=mf.index, y=mf, name=f"MA{ma_fast}",
+            line=dict(color="#58a6ff", width=1.2),
+            hovertemplate=f"MA{ma_fast}: %{{y:.2f}}<extra></extra>",
+        ), row=1, col=1)
+
+    # ── Slow MA
+    if len(df) >= ma_slow:
+        ms = df["Close"].rolling(ma_slow).mean()
+        fig.add_trace(go.Scatter(
+            x=ms.index, y=ms, name=f"MA{ma_slow}",
+            line=dict(color="#f87171", width=1.4, dash="dash"),
+            hovertemplate=f"MA{ma_slow}: %{{y:.2f}}<extra></extra>",
+        ), row=1, col=1)
+
+    # ── Volume bars
+    if show_volume and "Volume" in df.columns and rows == 2:
+        vol_colors = [
+            "#3fb950" if c >= o else "#f85149"
+            for c, o in zip(df["Close"], df["Open"])
+        ]
+        fig.add_trace(go.Bar(
+            x=df.index, y=df["Volume"],
+            name="Volume",
+            marker=dict(color=vol_colors, opacity=0.5, line=dict(width=0)),
+            hovertemplate="Vol: %{y:,.0f}<extra></extra>",
+        ), row=2, col=1)
+
+    fig.update_layout(
+        **{**PLOTLY_LAYOUT,
+           "height": height,
+           "title": dict(
+               text=f"<b>{ticker}</b>  {name[:40]}  "
+                    f"<span style='color:{ret_col};font-size:10px'>{arr} {ytd_ret*100:.1f}% since {start_date}</span>",
+               font=dict(size=12, color="#c9d1d9"),
+           ),
+           "xaxis_rangeslider_visible": False,
+        }
+    )
+    fig.update_xaxes(gridcolor="#1e2a38", showgrid=True)
+    fig.update_yaxes(gridcolor="#1e2a38", showgrid=True)
+    return fig
+
+
 def price_chart(ticker, height=300, ma_fast=50, ma_slow=200):
+    """Line chart fallback (used for ratio overlays and FX)."""
     if ticker not in prices.columns:
         return None
     s    = prices[ticker].dropna()
@@ -556,6 +657,38 @@ with tab_cmd:
         with c4: st.metric("Declining MTD", f"{dec}")
         with c5: st.metric("Worst Drawdown",f"{worst_d*100:.1f}%  {worst_t}")
 
+    st.markdown("---")
+    st.markdown("## Broad Market Overview")
+    st.caption("Candlestick overview across key regional benchmarks and macro indicators · Uses last 6 months of data")
+
+    # ── Region groups for the broad market grid
+    BROAD_MARKET_GROUPS = {
+        "US Equities": ["SPY", "QQQ", "IWM", "RSP"],
+        "Global / EM":  ["ACWX", "EEM", "EFA", "VGK", "EWJ"],
+        "Rates / Credit": ["TLT", "IEF", "HYG", "TIP"],
+        "Hard Assets":  ["GLD", "DBC", "SLV", "USO"],
+        "Thesis Signals": ["UUP", "TIP", "DBC", "GLD"],
+    }
+
+    cmd_grp_sel = st.selectbox(
+        "Group",
+        list(BROAD_MARKET_GROUPS.keys()),
+        key="cmd_bm_group",
+    )
+    bm_tickers = [t for t in BROAD_MARKET_GROUPS[cmd_grp_sel] if t in prices.columns]
+
+    bm_ma_fast = st.select_slider("Fast MA", options=[10, 20, 50], value=20, key="bm_maf")
+    bm_ma_slow = st.select_slider("Slow MA", options=[50, 100, 200], value=50, key="bm_mas")
+    bm_show_vol = st.checkbox("Show volume", value=False, key="bm_vol")
+
+    if bm_tickers:
+        bm_cols = st.columns(2)
+        for i, t in enumerate(bm_tickers):
+            fig = ohlcv_chart(t, height=340, ma_fast=bm_ma_fast, ma_slow=bm_ma_slow, show_volume=bm_show_vol)
+            if fig:
+                with bm_cols[i % 2]:
+                    st.plotly_chart(fig, use_container_width=True)
+
 # ════════════════════════════════════════════════════════════
 # TAB 1 — CROSS-ASSET
 # ════════════════════════════════════════════════════════════
@@ -627,66 +760,146 @@ with tab_cross:
 
 # ════════════════════════════════════════════════════════════
 # TAB 2 — EQUITIES
+# Drill-down: Asset Class → Geography → Sleeve → Chart/Table
 # ════════════════════════════════════════════════════════════
 
 with tab_eq:
 
     st.markdown("## Equities")
 
-    eq_view = st.radio("View", ["Returns Table", "Price Charts", "Ratio Charts"], horizontal=True)
+    # ── Top-level view selector
+    eq_view = st.radio(
+        "View",
+        ["Returns Table", "Candle Charts", "Ratio Charts"],
+        horizontal=True,
+        key="eq_view_radio",
+    )
 
-    # Sub-group filter
-    group_options = list(EQUITY_GROUPS.keys())
-    sel_groups    = st.multiselect("Groups", group_options, default=group_options[:6])
+    st.markdown("---")
 
+    # ── Geography / sleeve selector — mirrors UNIVERSE hierarchy
+    # Level 1: Region
+    eq_regions = list(UNIVERSE["Equities"].keys())  # USA, Europe, Asia-Pacific, Emerging Markets, Global
+    sel_region = st.selectbox("Region", ["All"] + eq_regions, key="eq_region")
+
+    # Level 2: Group within region (dynamic based on region selection)
+    if sel_region == "All":
+        available_groups = {
+            f"{reg}  ›  {grp}": tickers
+            for reg, reg_val in UNIVERSE["Equities"].items()
+            for grp, tickers in reg_val.items()
+        }
+    else:
+        available_groups = {
+            grp: tickers
+            for grp, tickers in UNIVERSE["Equities"][sel_region].items()
+        }
+
+    group_keys   = list(available_groups.keys())
+    default_grps = group_keys[:3] if len(group_keys) >= 3 else group_keys
+    sel_groups   = st.multiselect("Sleeves", group_keys, default=default_grps, key="eq_sleeves")
+
+    # ── Collect selected tickers
+    sel_tickers = list(dict.fromkeys(
+        t for grp in sel_groups
+        for t in available_groups.get(grp, [])
+        if t in prices.columns
+    ))
+
+    if not sel_tickers:
+        st.info("Select at least one sleeve above.")
+        st.stop()
+
+    # ════════════════════════════
+    # VIEW: RETURNS TABLE
+    # ════════════════════════════
     if eq_view == "Returns Table":
 
+        pct_cols = ["Daily %", "MTD %", "YTD %", "1YR %"]
+
         for grp in sel_groups:
-            tickers   = EQUITY_GROUPS.get(grp, [])
+            tickers   = available_groups.get(grp, [])
             available = [t for t in tickers if t in prices.columns]
             if not available:
                 continue
-            block = build_table(available)
+            block = build_table(available).sort_values(sort_by, ascending=False)
             if block.empty:
                 continue
-            block = block.sort_values(sort_by, ascending=False)
 
             with st.expander(f"**{grp}** — {len(available)} tickers", expanded=True):
-                pct_cols = ["Daily %", "MTD %", "YTD %", "1YR %"]
-                display  = block[["Name", "Last"] + pct_cols + ["Drawdown", "vs MA200"]].copy()
-                styled   = style_pct_table(display, pct_cols, ["Drawdown"])
+                display = block[["Name", "Last"] + pct_cols + ["Drawdown", "vs MA200"]].copy()
+                styled  = style_pct_table(display, pct_cols, ["Drawdown"])
                 st.dataframe(styled, use_container_width=True)
+                csv = block.to_csv().encode("utf-8")
+                st.download_button(
+                    f"⬇ CSV",
+                    csv,
+                    file_name=f"{grp.replace(' ','_').replace('>','').replace('›','')}.csv",
+                    mime="text/csv",
+                    key=f"dl_eq_{grp}",
+                )
 
-            # CSV download per group
-            csv = block.to_csv().encode("utf-8")
-            st.download_button(f"⬇ {grp} CSV", csv,
-                               file_name=f"{grp.replace(' ','_')}.csv",
-                               mime="text/csv", key=f"dl_{grp}")
+    # ════════════════════════════
+    # VIEW: CANDLE CHARTS
+    # ════════════════════════════
+    elif eq_view == "Candle Charts":
 
-    elif eq_view == "Price Charts":
+        # Chart controls
+        ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([2, 1, 1, 1, 1])
+        with ctrl1:
+            chart_ticker = st.selectbox(
+                "Ticker",
+                options=sel_tickers,
+                key="eq_chart_ticker",
+            )
+        with ctrl2:
+            ma_fast = st.number_input("Fast MA", min_value=5, max_value=100, value=20, step=5, key="eq_maf")
+        with ctrl3:
+            ma_slow = st.number_input("Slow MA", min_value=20, max_value=300, value=50, step=10, key="eq_mas")
+        with ctrl4:
+            show_vol = st.checkbox("Volume", value=True, key="eq_vol")
+        with ctrl5:
+            chart_height = st.selectbox("Height", [400, 500, 600], index=1, key="eq_h")
 
-        all_eq_avail = [t for t in _all_eq if t in prices.columns]
-        selected     = st.multiselect("Tickers",
-            options=all_eq_avail,
-            default=[t for t in ["SPY", "GLD", "EEM", "DBC", "UUP"] if t in prices.columns])
-        ma_fast = st.slider("Fast MA", 10, 100, 50, 5)
-        ma_slow = st.slider("Slow MA", 50, 300, 200, 10)
+        # Single focused chart
+        fig = ohlcv_chart(chart_ticker, height=chart_height, ma_fast=ma_fast, ma_slow=ma_slow, show_volume=show_vol)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
 
-        chart_cols = st.columns(2)
-        for i, t in enumerate(selected):
-            fig = price_chart(t, height=320, ma_fast=ma_fast, ma_slow=ma_slow)
-            if fig:
-                with chart_cols[i % 2]:
-                    st.plotly_chart(fig, use_container_width=True)
+        # ── Mini overview grid: line charts for all selected tickers
+        st.markdown("### Overview — All Selected Tickers")
+        st.caption("Candle charts for individual tickers above · Click any ticker in the selector to focus")
 
-    else:  # Ratio Charts
+        grid_cols = st.columns(3)
+        for i, t in enumerate(sel_tickers):
+            if t == chart_ticker:
+                continue  # skip the focused one
+            fig_mini = price_chart(t, height=220, ma_fast=ma_fast, ma_slow=ma_slow)
+            if fig_mini:
+                with grid_cols[i % 3]:
+                    st.plotly_chart(fig_mini, use_container_width=True)
 
-        ratio_cols = st.columns(2)
-        for i, (label, (num, den)) in enumerate(MACRO_RATIOS.items()):
-            fig = ratio_chart(num, den, label)
-            if fig:
-                with ratio_cols[i % 2]:
-                    st.plotly_chart(fig, use_container_width=True)
+    # ════════════════════════════
+    # VIEW: RATIO CHARTS
+    # ════════════════════════════
+    else:
+
+        # Filter ratios to only those whose tickers are in the selected universe
+        all_sel = set(sel_tickers) | set(prices.columns)
+        relevant_ratios = {
+            lbl: (n, d) for lbl, (n, d) in MACRO_RATIOS.items()
+            if n in all_sel and d in all_sel
+        }
+
+        if not relevant_ratios:
+            st.info("No ratios available for the selected sleeves. Try selecting broader groups.")
+        else:
+            ratio_cols = st.columns(2)
+            for i, (label, (num, den)) in enumerate(relevant_ratios.items()):
+                fig = ratio_chart(num, den, label)
+                if fig:
+                    with ratio_cols[i % 2]:
+                        st.plotly_chart(fig, use_container_width=True)
 
 
 # ════════════════════════════════════════════════════════════
@@ -902,6 +1115,7 @@ with tab_macro:
     st.markdown("### Upcoming Events")
 
     # Editable dataframe for manual calendar entries
+    # Note: Date stored as string (YYYY-MM-DD) to avoid Streamlit DateColumn/string incompatibility
     default_events = pd.DataFrame([
         {"Date": "", "Time (UTC)": "", "Country": "", "Event": "", "Period": "", "Forecast": "", "Prior": "", "Notes": ""},
     ])
@@ -911,7 +1125,7 @@ with tab_macro:
         use_container_width=True,
         num_rows="dynamic",
         column_config={
-            "Date":         st.column_config.DateColumn("Date"),
+            "Date":         st.column_config.TextColumn("Date (YYYY-MM-DD)", max_chars=12),
             "Time (UTC)":   st.column_config.TextColumn("Time (UTC)", max_chars=10),
             "Country":      st.column_config.TextColumn("Country", max_chars=20),
             "Event":        st.column_config.TextColumn("Event"),
